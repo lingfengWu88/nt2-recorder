@@ -5,9 +5,10 @@
 <p>请先打开官方 Opdrachten oefenen 题目选择页，再从该标签页打开扩展并启动流程。扩展依次设置 Programma/onderdeel、等待并设置 Soort opdracht，确认两项后点击 Zoek，再选择全部匹配题目。这样 Chrome 才能授权在同一标签页录制。</p>
 <label>口语项目<select id="program"><option>Programma I Spreken</option><option selected>Programma II Spreken</option></select></label>
 <label>题型<select id="kind"><option value="default">Alle soorten</option><option>Kort</option><option>Lang</option><option>Middellang</option></select></label>
+<label>每场题目数（1–100）<input id="batchSize" type="number" min="1" max="100" step="1" value="20" required></label>
 <p><button id="autoStart">选择题目并进入考试</button></p>
 <small>扩展会在导航前按 Chrome 授权准备当前标签页捕获流，但到 Vraag 1 才开始保存视频。之后跳过声音示例、完成麦克风检查并进入 Vraag 1 时，会从该既有流自动开始录制。请从官方题目选择页启动，并确保考试仍在同一标签页、同一网站来源；从新标签页/其他网站启动无法授权捕获官方页面。浏览器若询问麦克风权限，请在系统提示中允许。</small>
-<small>官网每场最多选择 100 道题。若匹配题目超过 100 道，扩展会在保存当前批次后复用同一标签页加载下一批，自动继续录制；编号连续递增。</small>
+<small>设置每场题目数（1–100，默认 20）。匹配题目超过该数量时，扩展会先保存本场全部录音，再在同一标签页返回官网并自动开始下一批；中途不关闭标签页，以保留 Chrome 捕获授权。各批文件编号连续递增。</small>
 <h2>已打开考试：仅开始录制</h2>
 <p>已在一道正在进行的题目时使用；VOLGENDE 必须仍为禁用状态。</p>
 <label>文件名前缀<input id="prefix" value="NT2_B2_Kort" maxlength="60"></label>

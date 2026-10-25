@@ -1,5 +1,7 @@
 let starting=false;
 const advancing=new Map();
+const DEFAULT_AUTOMATION_BATCH_SIZE=20;
+const MAX_AUTOMATION_BATCH_SIZE=100;
 function isAllowedPage(address){
   try{
     const url=new URL(address);
@@ -19,6 +21,11 @@ function configOf(c){
   const start=Number(c.start);
   if(!Number.isInteger(start)||start<1||start>99999)throw Error('起始编号必须在 1–99999 之间');
   return {prefix:safeName(c.prefix),start};
+}
+function automationBatchSizeOf(value){
+  const batchSize=Number(value??DEFAULT_AUTOMATION_BATCH_SIZE);
+  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>MAX_AUTOMATION_BATCH_SIZE)throw Error(`每场题目数必须是 1–${MAX_AUTOMATION_BATCH_SIZE} 之间的整数。`);
+  return batchSize;
 }
 async function setAutomationStatus(text,running=true,phase='PORTAL_AUTOMATION'){
   await chrome.storage.local.set({status:{text,running,phase,time:Date.now()}});
@@ -178,6 +185,7 @@ async function waitForNewPlayer(portalTabId,beforeIds){
   throw Error('Start 已点击，但未找到 NT2 播放器页面。请确认浏览器没有拦截新标签页。');
 }
 async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=null,batchOffset=0){
+  const batchSize=automationBatchSizeOf(config.batchSize);
   if(!isPortalPage((await chrome.tabs.get(tabId)).url))throw Error('请先打开官方“Opdrachten oefenen”题目选择页。');
   await chrome.scripting.executeScript({target:{tabId},files:['portal.js']});
   await delay(300);
@@ -190,7 +198,7 @@ async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=
   const nextPortalTabId=null;
   const recordingConfig={...config,start:Number(config.start)+batchOffset};
   await chrome.storage.session.set({automation:{config,allQuestions,nextIndex,portalTabId:nextPortalTabId}});
-  const batchNumber=Math.floor(batchOffset/100)+1,totalBatches=Math.ceil(allQuestions.length/100);
+  const batchNumber=Math.floor(batchOffset/batchSize)+1,totalBatches=Math.ceil(allQuestions.length/batchSize);
   await setAutomationStatus(`已选择第 ${batchNumber}/${totalBatches} 批 ${prepared.count} 道题（筛选共 ${allQuestions.length} 道）；正在启动官方考试页面……`);
   const beforeTabs=await chrome.tabs.query({currentWindow:true});
   const beforeIds=new Set(beforeTabs.map(tab=>tab.id));
@@ -241,7 +249,8 @@ async function startNextAutomationBatch(completedPlayerTabId){
   }
   const portalTabId=completedPlayerTabId;
   const offset=automation.nextIndex;
-  const selectionQuestions=automation.allQuestions.slice(offset,offset+100);
+  const batchSize=automationBatchSizeOf(automation.config?.batchSize);
+  const selectionQuestions=automation.allQuestions.slice(offset,offset+batchSize);
   await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionQuestions.length} / ${automation.allQuestions.length}……`,true,'PORTAL_AUTOMATION');
   console.info('[NT2 Recorder] Reusing the completed player tab for the next batch to preserve its tab-scoped capture authorization.',{completedPlayerTabId,portalTabId,offset});
   await chrome.tabs.update(portalTabId,{url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten'});
@@ -481,7 +490,7 @@ async function handle(m,s){
     const kind=String(m.config?.kind||'default').trim();
     if(!['Programma I Spreken','Programma II Spreken'].includes(program))throw Error('自动音频/麦克风流程仅支持 Programma I/II Spreken。');
     if(!['default','Kort','Lang','Middellang'].includes(kind))throw Error('请选择有效的题型。');
-    const config={...m.config,program,kind};
+    const config={...m.config,program,kind,batchSize:automationBatchSizeOf(m.config?.batchSize)};
     configOf(config);
     starting=true;
     try{

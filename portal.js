@@ -2,6 +2,8 @@
 const normalize = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const report = text => chrome.runtime.sendMessage({ to: 'worker', type: 'automation-status', text }).catch(() => {});
+const DEFAULT_AUTOMATION_BATCH_SIZE=20;
+const MAX_AUTOMATION_BATCH_SIZE=100;
 
 function rowsOnPage() {
   return [...document.querySelectorAll('table tr,[role="row"]')].map(row => {
@@ -178,6 +180,8 @@ async function advancePage() {
 
 async function prepare(message) {
   const config = message.config;
+  const batchSize=Number(config.batchSize??DEFAULT_AUTOMATION_BATCH_SIZE);
+  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>MAX_AUTOMATION_BATCH_SIZE)throw Error(`每场题目数必须是 1–${MAX_AUTOMATION_BATCH_SIZE} 之间的整数。`);
   await report('等待官方项目/题型筛选器可用……');
   const {program,kind}=await waitForPortalControls();
   await report(`正在设置项目/考试部分：${config.program}……`);
@@ -214,9 +218,9 @@ async function prepare(message) {
   }
 
   if (!allQuestions.length) throw Error('此项目和题型下没有找到可选题目。');
-  const requestedQuestions=Array.isArray(config.selectionQuestions)?config.selectionQuestions:allQuestions.slice(0,100);
+  const requestedQuestions=Array.isArray(config.selectionQuestions)?config.selectionQuestions:allQuestions.slice(0,batchSize);
   if(!requestedQuestions.length)throw Error('没有待选择的匹配题目。');
-  if(requestedQuestions.length>100)throw Error('官网每场最多允许选择 100 道题。');
+  if(requestedQuestions.length>batchSize)throw Error(`每场最多选择 ${batchSize} 道题。`);
   const requestedIdentities=new Set();
   const selectedQuestions=requestedQuestions.map(requested=>{
     if(!requested||!Number.isInteger(requested.page)||!Number.isInteger(requested.rowIndex))throw Error('题目批次缺少有效的页码/行位置；未启动。');
