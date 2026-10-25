@@ -1,6 +1,7 @@
 let running=false,stopRequested=false,stream=null,captureTabId=null,recordingStream=null,output=null,active=null,segmentNumber=0,config=null,batch='',error=null,retainCaptureForNextBatch=false;
 let cropVideo=null,cropCanvas=null,cropTimer=null,cropCanvasTrack=null;
 let events=[],eventWaiter=null,saves=[],completed=false,batchComplete=false;
+let estimatedSegmentDurationMs=120000;
 async function rpc(type,args={}){const r=await chrome.runtime.sendMessage({to:'worker',type,...args});if(!r?.ok)throw Error(r?.error||'后台无响应');return r;}
 async function status(text,phase='RECORDING'){await rpc('status',{status:{text,running,phase,time:Date.now()}});}
 function enqueue(event,reply){events.push({event,reply});eventWaiter?.();eventWaiter=null;}
@@ -36,9 +37,12 @@ async function releaseCapture(){
 function startSegment(){
   const mimeType=['video/webm;codecs=vp8,opus','video/webm'].find(type=>MediaRecorder.isTypeSupported(type));
   if(!mimeType)throw Error('浏览器不支持 WebM 录制');
-  // Keep the captured resolution for readable text, but use a lower bitrate
-  // to substantially reduce each question clip's file size.
-  const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond:750000,audioBitsPerSecond:64000});
+  // Aim for ~500 KiB per segment using the last segment's duration. The first
+  // segment assumes two minutes; a minimum audio/video rate avoids unusable output.
+  const targetBitsPerSecond=500*1024*8*0.9/(estimatedSegmentDurationMs/1000);
+  const audioBitsPerSecond=24000;
+  const videoBitsPerSecond=Math.max(8000,Math.floor(targetBitsPerSecond-audioBitsPerSecond));
+  const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond,audioBitsPerSecond});
   let resolve,reject;
   const done=new Promise((a,b)=>{resolve=a;reject=b;});
   done.catch(()=>{});
@@ -50,7 +54,7 @@ function startSegment(){
   };
   recorder.onstop=()=>resolve(new Blob(chunks,{type:mimeType}));
   recorder.start(1000);
-  active={recorder,done};
+  active={recorder,done,startedAt:performance.now()};
   segmentNumber++;
 }
 async function stopSegment(partial=false){
@@ -58,6 +62,8 @@ async function stopSegment(partial=false){
   const segment=active;active=null;
   if(segment.recorder.state!=='inactive')segment.recorder.stop();
   const blob=await segment.done;
+  const durationMs=Math.max(1000,performance.now()-segment.startedAt);
+  estimatedSegmentDurationMs=Math.round(estimatedSegmentDurationMs*0.5+durationMs*0.5);
   if(blob.size<1024)throw Error('录制结果为空或过短，已停止');
   const segmentIndex=segmentNumber;
   const index=config.start+segmentIndex-1;
@@ -104,7 +110,9 @@ async function createCroppedRecordingStream(crop){
   const canvasStream=cropCanvas.captureStream(0);
   cropCanvasTrack=canvasStream.getVideoTracks()[0];
   paint();
-  cropTimer=setInterval(paint,1000/30);
+  // A low frame rate preserves readable static question cards at the small
+  // target bitrate; animated UI will appear less smooth.
+  cropTimer=setInterval(paint,1000/5);
   recordingStream=new MediaStream([...canvasStream.getVideoTracks(),...stream.getAudioTracks()]);
 }
 function releaseCrop(){
@@ -142,7 +150,7 @@ async function handleEvent(event){
 }
 async function run(message,ready){
   config=message.config;batch=new Date().toISOString().replace(/[:.]/g,'-');
-  segmentNumber=0;error=null;saves=[];events=[];stopRequested=false;retainCaptureForNextBatch=false;completed=false;batchComplete=false;
+  segmentNumber=0;estimatedSegmentDurationMs=120000;error=null;saves=[];events=[];stopRequested=false;retainCaptureForNextBatch=false;completed=false;batchComplete=false;
   let initialized=false;
   try{
     if(stream&&captureTabId!==message.tabId)throw Error('预先捕获的标签页与考试播放器不一致。');

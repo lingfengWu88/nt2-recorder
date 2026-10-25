@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NT2 本地分题录制",
-  "version": "0.4.14",
+  "version": "0.4.16",
   "minimum_chrome_version": "116",
   "description": "按指定口语题目自动启动 NT2 练习、通过设置页并录制分题视频。",
   "permissions": ["activeTab", "tabs", "scripting", "tabCapture", "offscreen", "downloads", "storage"],
