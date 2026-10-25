@@ -20,11 +20,36 @@ function configOf(c){
   if(!Number.isInteger(start)||start<1||start>99999)throw Error('起始编号必须在 1–99999 之间');
   return {prefix:safeName(c.prefix),start};
 }
-async function setAutomationStatus(text,running=true){
-  await chrome.storage.local.set({status:{text,running,time:Date.now()}});
+async function setAutomationStatus(text,running=true,phase='PORTAL_AUTOMATION'){
+  await chrome.storage.local.set({status:{text,running,phase,time:Date.now()}});
   await chrome.action.setBadgeText({text:running?'AUTO':''});
 }
-async function beginRecording(tabId,rawConfig){
+async function getAuthorizedTabStreamId(tabId){
+  return chrome.tabCapture.getMediaStreamId({targetTabId:tabId});
+}
+async function prepareTabCapture(tabId){
+  const tab=await chrome.tabs.get(tabId);
+  if(!isPortalPage(tab.url))throw Error(`请在官方题目选择页启动自动流程；当前标签页不是受支持的 NT2 Portal（${tab.url||'URL 不可用'}）。`);
+  const [activeTab]=await chrome.tabs.query({active:true,currentWindow:true});
+  if(activeTab?.id!==tabId)throw Error('请先切换到 NT2 题目选择页，再从该标签页点击扩展，以授权 Chrome 捕获此标签页。');
+  await setAutomationStatus('CAPTURE_INITIALIZING：正在按 Chrome 授权准备当前 NT2 标签页……',true,'CAPTURE_INITIALIZING');
+  await ensureOffscreen();
+  const state=await chrome.runtime.sendMessage({to:'offscreen',type:'state'});
+  if(state.running)throw Error('已有录制正在运行，无法初始化新的标签页捕获。');
+  if(state.preparedTabId===tabId){
+    if(!state.captureActive)throw Error('此前准备的标签页捕获流已结束；请停止并重新启动自动流程。');
+    await setAutomationStatus('CAPTURE_READY：当前 NT2 标签页捕获已准备就绪。',true,'CAPTURE_READY');
+    return;
+  }
+  if(state.preparedTabId!=null)throw Error('Offscreen 中已有属于其他标签页的捕获流；请停止旧任务后重试。');
+  // Obtain the stream ID only while handling the user's initial action, then
+  // consume it immediately in the offscreen document before portal navigation.
+  const streamId=await getAuthorizedTabStreamId(tabId);
+  const prepared=await chrome.runtime.sendMessage({to:'offscreen',type:'prepare',tabId,streamId});
+  if(!prepared?.ok||prepared.preparedTabId!==tabId||!prepared.captureActive)throw Error(prepared?.error||'Chrome 标签页捕获流未能在导航前准备完成。');
+  await setAutomationStatus('CAPTURE_READY：Chrome 已授权并保持当前标签页捕获流。',true,'CAPTURE_READY');
+}
+async function beginRecording(tabId,rawConfig,requirePreparedCapture=false){
   const cfg=configOf(rawConfig);
   let recordingStarted=false,frameId=null;
   try{
@@ -39,8 +64,11 @@ async function beginRecording(tabId,rawConfig){
     const state=await chrome.runtime.sendMessage({to:'offscreen',type:'state'});
     if(state.running)throw Error('已有录制正在运行，请先停止');
     await chrome.storage.local.set({config:cfg});
-    const streamId=await chrome.tabCapture.getMediaStreamId({targetTabId:tabId});
-    const res=await chrome.runtime.sendMessage({to:'offscreen',type:'start',streamId,config:cfg,crop});
+    if(requirePreparedCapture&&state.preparedTabId!==tabId)throw Error('导航前准备的 Chrome 捕获流不存在或不属于当前考试标签页；为避免未授权捕获，没有在 Vraag 1 重新请求权限。');
+    if(state.preparedTabId===tabId&&!state.captureActive)throw Error('导航前准备的 Chrome 捕获流已结束；没有在 Vraag 1 重新请求权限。');
+    if(state.preparedTabId!=null&&state.preparedTabId!==tabId)throw Error('已准备的捕获流属于其他标签页，拒绝开始录制。');
+    const streamId=state.preparedTabId===tabId?undefined:await getAuthorizedTabStreamId(tabId);
+    const res=await chrome.runtime.sendMessage({to:'offscreen',type:'start',streamId,tabId,config:cfg,crop});
     if(!res.ok)throw Error(res.error);
     recordingStarted=true;
     await chrome.scripting.executeScript({target:{tabId,frameIds:[frameId]},files:['observer.js']});
@@ -136,35 +164,29 @@ async function waitForNewPlayer(portalTabId,beforeIds){
     const tabs=await chrome.tabs.query({currentWindow:true});
     const matches=tabs.filter(tab=>isAllowedPage(tab.url)&&new URL(tab.url).pathname.startsWith('/facet-player-openbaar/'));
     const newTab=matches.find(tab=>!beforeIds.has(tab.id));
-    if(newTab)return newTab;
+    if(newTab){
+      console.info('[NT2 Recorder] Official site opened the player in a separate tab.',{portalTabId,playerTabId:newTab.id});
+      return newTab;
+    }
     const sameTab=matches.find(tab=>tab.id===portalTabId);
-    if(sameTab)return sameTab;
+    if(sameTab){
+      console.info('[NT2 Recorder] Official site navigated the selection tab to the player.',{playerTabId:sameTab.id});
+      return sameTab;
+    }
     await delay(300);
   }
   throw Error('Start 已点击，但未找到 NT2 播放器页面。请确认浏览器没有拦截新标签页。');
-}
-async function reservePortalTab(){
-  const tab=await chrome.tabs.create({url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten',active:false});
-  const deadline=Date.now()+20000;
-  while(Date.now()<deadline){
-    const current=await chrome.tabs.get(tab.id);
-    if(current.status==='complete'&&isPortalPage(current.url)){
-      return current.id;
-    }
-    await delay(200);
-  }
-  throw Error('无法准备下一批的官方题目选择页。');
 }
 async function automatePortal(tabId,config,selectionTitles=null,allTitles=null,batchOffset=0){
   if(!isPortalPage((await chrome.tabs.get(tabId)).url))throw Error('请先打开官方“Opdrachten oefenen”题目选择页。');
   await chrome.scripting.executeScript({target:{tabId},files:['portal.js']});
   await delay(300);
-  await setAutomationStatus('正在核对项目、题型和题目标题……');
+  await setAutomationStatus('正在核对项目、题型和题目标题……',true,'PORTAL_AUTOMATION');
   const prepared=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'prepare',config:{...config,...(selectionTitles?{selectionTitles}: {})}});
   if(!prepared?.ok)throw Error(prepared?.error||'题目选择失败');
   allTitles=allTitles||prepared.allTitles;
   const nextIndex=batchOffset+prepared.count;
-  const nextPortalTabId=nextIndex<allTitles.length?await reservePortalTab():null;
+  const nextPortalTabId=null;
   const recordingConfig={...config,start:Number(config.start)+batchOffset};
   await chrome.storage.session.set({automation:{config,allTitles,nextIndex,portalTabId:nextPortalTabId}});
   const batchNumber=Math.floor(batchOffset/100)+1,totalBatches=Math.ceil(allTitles.length/100);
@@ -182,41 +204,32 @@ async function automatePortal(tabId,config,selectionTitles=null,allTitles=null,b
   // Treat each onboarding page as a distinct state. In particular, never
   // interpret a generic VOLGENDE button as proof that setup is complete.
   await waitForPlayerState(playerTabId,state=>/\bcontrole\b/i.test(state.text)&&hasNext(state),'Controle 页面');
-  await setAutomationStatus('Controle 页面已就绪；正在点击 VOLGENDE……');
+  await setAutomationStatus('Controle 页面已就绪；正在点击 VOLGENDE……',true,'EXAM_PREPARATION');
   await clickNextOnPlayer(playerTabId,/\bcontrole\b/i);
 
   await waitForPlayerState(playerTabId,state=>/geluid\s+instellen/i.test(state.text),'Geluid instellen 页面');
-  await setAutomationStatus('正在跳过声音示例并选择“Geluid is goed”……');
+  await setAutomationStatus('正在跳过声音示例并选择“Geluid is goed”……',true,'EXAM_PREPARATION');
   await clickPlayerExactText(playerTabId,'Geluid is goed',/geluid\s+instellen/i);
   await clickNextOnPlayer(playerTabId,/geluid\s+instellen/i);
 
   await waitForPlayerState(playerTabId,state=>/microfoon\s+instellen/i.test(state.text),'Microfoon instellen 页面');
-  await setAutomationStatus('正在选择“Opname is goed”；如 Chrome 请求麦克风权限，请在浏览器提示中允许。');
+  await setAutomationStatus('正在选择“Opname is goed”；如 Chrome 请求麦克风权限，请在浏览器提示中允许。',true,'EXAM_PREPARATION');
   await clickPlayerExactText(playerTabId,'Opname is goed',/microfoon\s+instellen/i);
   await clickNextOnPlayer(playerTabId,/microfoon\s+instellen/i);
 
   await waitForPlayerState(playerTabId,state=>/\bstart\b/i.test(state.text)&&hasNext(state),'Start 页面');
-  await setAutomationStatus('Start 页面已就绪；正在点击 VOLGENDE……');
+  await setAutomationStatus('Start 页面已就绪；正在点击 VOLGENDE……',true,'EXAM_PREPARATION');
   await clickNextOnPlayer(playerTabId,/\bstart\b/i);
 
   await waitForPlayerState(playerTabId,isQuestionOne,'第一道实际考试题 Vraag 1 van x');
-  await setAutomationStatus('Vraag 1 已就绪，开始分题录制……');
-  await beginRecording(playerTabId,recordingConfig);
-}
-async function openPortalIfNeeded(tabId){
-  const current=await chrome.tabs.get(tabId);
-  if(isPortalPage(current.url))return tabId;
-  await setAutomationStatus('正在打开官方 NT2 题目选择页面……');
-  const portal=await chrome.tabs.create({url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten',active:true});
-  const deadline=Date.now()+30000;
-  while(Date.now()<deadline){
-    const loaded=await chrome.tabs.get(portal.id);
-    if(loaded.status==='complete'&&isPortalPage(loaded.url))return portal.id;
-    await delay(200);
+  await setAutomationStatus('Vraag 1 已就绪；正在使用导航前准备的捕获流自动开始录制……',true,'RECORDING');
+  try{
+    await beginRecording(playerTabId,recordingConfig,true);
+  }catch(error){
+    throw Error(`Vraag 1 已就绪，但 Chrome 未允许自动捕获此标签页：${error.message}。请从官方题目选择页打开扩展启动流程，并确认播放器留在同一标签页和同一网站来源（origin）。`);
   }
-  throw Error('无法打开官方 Opdrachten oefenen 页面。请检查网络连接或浏览器是否拦截了该页面。');
 }
-async function startNextAutomationBatch(){
+async function startNextAutomationBatch(completedPlayerTabId){
   const {automation}=await chrome.storage.session.get('automation');
   if(!automation)return false;
   if(automation.nextIndex>=automation.allTitles.length){
@@ -224,11 +237,21 @@ async function startNextAutomationBatch(){
     await setAutomationStatus(`全部 ${automation.allTitles.length} 道匹配题目已完成录制。`,false);
     return false;
   }
-  if(automation.portalTabId==null)throw Error('没有可用于启动下一批的官方题目选择页。');
+  const portalTabId=completedPlayerTabId;
   const offset=automation.nextIndex;
   const selectionTitles=automation.allTitles.slice(offset,offset+100);
-  await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionTitles.length} / ${automation.allTitles.length}……`);
-  await automatePortal(automation.portalTabId,automation.config,selectionTitles,automation.allTitles,offset);
+  await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionTitles.length} / ${automation.allTitles.length}……`,true,'PORTAL_AUTOMATION');
+  console.info('[NT2 Recorder] Reusing the completed player tab for the next batch to preserve its tab-scoped capture authorization.',{completedPlayerTabId,portalTabId,offset});
+  await chrome.tabs.update(portalTabId,{url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten'});
+  const deadline=Date.now()+30000;
+  while(Date.now()<deadline){
+    const tab=await chrome.tabs.get(portalTabId);
+    if(tab.status==='complete'&&isPortalPage(tab.url))break;
+    await delay(200);
+  }
+  const portalTab=await chrome.tabs.get(portalTabId);
+  if(!isPortalPage(portalTab.url)||portalTab.status!=='complete')throw Error('无法在已授权的播放器标签页打开下一批题目选择页。');
+  await automatePortal(portalTabId,automation.config,selectionTitles,automation.allTitles,offset);
   return true;
 }
 async function findNextButton(tabId){
@@ -390,13 +413,19 @@ async function handle(m,s){
       const attempt={manualClick:false,autoClickInitiated:false,clickObserved:false,resolveClick:null};
       advancing.set(session.tabId,attempt);
       try{
-        const saved=await chrome.runtime.sendMessage({to:'offscreen',type:'event',event});
+          let recorderEvent=event;
+          if(event.name==='final-ready'){
+            const {automation}=await chrome.storage.session.get('automation');
+            const hasNextBatch=Boolean(automation&&automation.nextIndex<automation.allTitles.length);
+            recorderEvent={...event,retainCaptureForNextBatch:hasNextBatch,workflowComplete:!hasNextBatch};
+          }
+          const saved=await chrome.runtime.sendMessage({to:'offscreen',type:'event',event:recorderEvent});
         if(!saved?.ok)throw Error(saved?.error||'保存当前题目失败');
         if(event.name==='final-ready'){
           await stopObserver(session.tabId,session.frameId);
           await chrome.storage.session.remove('session');
-          await chrome.tabs.remove(session.tabId);
-          await startNextAutomationBatch();
+          const hasNextBatch=await startNextAutomationBatch(session.tabId);
+          if(!hasNextBatch)await chrome.tabs.remove(session.tabId);
         }else if(!attempt.manualClick){
           attempt.autoClickInitiated=true;
           const result=await clickNextButton(session.tabId,session.frameId);
@@ -408,7 +437,7 @@ async function handle(m,s){
       }catch(e){
         if(event.name==='final-ready'){
           await chrome.storage.session.remove('automation');
-          await setAutomationStatus(`最后一题片段已保存，但关闭页面或启动后续批次失败：${e.message}`,false);
+          await setAutomationStatus(`最后一题片段已保存，但关闭页面或启动后续批次失败：${e.message}`,false,'ERROR');
         }else{
           await chrome.runtime.sendMessage({to:'offscreen',type:'event',event:{name:'warning',message:`本题已保存，但无法自动进入下一题：${e.message}。请手动点击 VOLGENDE；录制会继续。`}});
         }
@@ -432,7 +461,16 @@ async function handle(m,s){
   if(m.type==='start'){
     if(starting)throw Error('正在启动，请稍候');
     starting=true;
-    try{return await beginRecording(m.tabId,m.config);}
+    try{
+      const {pendingCapture}=await chrome.storage.session.get('pendingCapture');
+      if(pendingCapture){
+        if(pendingCapture.tabId!==m.tabId)throw Error('自动设置已完成。请切换到 Vraag 1 播放器标签页，再打开扩展并点击“开始录制”。');
+        const result=await beginRecording(m.tabId,pendingCapture.config);
+        await chrome.storage.session.remove('pendingCapture');
+        return result;
+      }
+      return await beginRecording(m.tabId,m.config);
+    }
     finally{starting=false;}
   }
   if(m.type==='auto-start'){
@@ -445,11 +483,15 @@ async function handle(m,s){
     configOf(config);
     starting=true;
     try{
-      const portalTabId=await openPortalIfNeeded(m.tabId);
-      await automatePortal(portalTabId,config);
-      return {message:'流程完成：已选择题目、通过检查页并开始录制。'};
+      await prepareTabCapture(m.tabId);
+      await automatePortal(m.tabId,config);
+      return {message:'自动设置已完成，并已在 Vraag 1 自动开始录制。'};
     }catch(e){
-      await setAutomationStatus(`自动流程已停止：${e.message}`,false);
+      const {running:recording,preparedTabId}=await chrome.runtime.sendMessage({to:'offscreen',type:'state'}).catch(()=>({}));
+      if(!recording&&preparedTabId===m.tabId){
+        await chrome.runtime.sendMessage({to:'offscreen',type:'cancel-capture'}).catch(()=>{});
+      }
+      await setAutomationStatus(`自动流程已停止：${e.message}`,false,'ERROR');
       throw e;
     }finally{starting=false;}
   }

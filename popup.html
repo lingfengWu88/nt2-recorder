@@ -2,12 +2,12 @@
 <style>body{font:14px system-ui;width:350px;padding:16px;background:#f5f8f6;color:#16362c}h1{font-size:21px}h2{font-size:16px;margin:18px 0 8px}label{display:block;margin:12px 0}input,select,textarea{box-sizing:border-box;width:100%;padding:8px;border:1px solid #b9cfc5;border-radius:6px;margin-top:4px;background:white}textarea{min-height:92px;resize:vertical}button{padding:10px;border:0;border-radius:7px;background:#16634d;color:white;cursor:pointer}#autoStart{background:#215d8f}#stop{background:#9c3939}p,small{line-height:1.6}#status{white-space:pre-wrap;background:white;padding:10px;border-radius:8px;min-height:40px}button:disabled{opacity:.5}</style>
 <h1>NT2 分题录制</h1>
 <h2>自动选题并开始</h2>
-<p>可从任意浏览器标签页启动。扩展自动打开官方页面，依次设置 Programma/onderdeel、等待并设置 Soort opdracht，确认两项后点击 Zoek，再选择全部匹配题目。</p>
+<p>请先打开官方 Opdrachten oefenen 题目选择页，再从该标签页打开扩展并启动流程。扩展依次设置 Programma/onderdeel、等待并设置 Soort opdracht，确认两项后点击 Zoek，再选择全部匹配题目。这样 Chrome 才能授权在同一标签页录制。</p>
 <label>口语项目<select id="program"><option>Programma I Spreken</option><option selected>Programma II Spreken</option></select></label>
 <label>题型<select id="kind"><option value="default">Alle soorten</option><option>Kort</option><option>Lang</option><option>Middellang</option></select></label>
-<p><button id="autoStart">选择全部匹配题目并录制</button></p>
-<small>会跳过声音示例并直接点击 Geluid is goed；随后处理麦克风检查并点击 Opname is goed，再点击各页的 VOLGENDE（包括 Start 页）。确认进入 Vraag 1 后才开始录制。浏览器若询问麦克风权限，请在系统提示中允许。</small>
-<small>官网每场最多选择 100 道题。若匹配题目超过 100 道，扩展会分成多场自动完成；每场结束后保存并关闭播放器，再自动启动下一批。编号连续递增。新打开的官网页面会先等待筛选器完成加载。</small>
+<p><button id="autoStart">选择题目并进入考试</button></p>
+<small>扩展会在导航前按 Chrome 授权准备当前标签页捕获流，但到 Vraag 1 才开始保存视频。之后跳过声音示例、完成麦克风检查并进入 Vraag 1 时，会从该既有流自动开始录制。请从官方题目选择页启动，并确保考试仍在同一标签页、同一网站来源；从新标签页/其他网站启动无法授权捕获官方页面。浏览器若询问麦克风权限，请在系统提示中允许。</small>
+<small>官网每场最多选择 100 道题。若匹配题目超过 100 道，扩展会在保存当前批次后复用同一标签页加载下一批，自动继续录制；编号连续递增。</small>
 <h2>已打开考试：仅开始录制</h2>
 <p>已在一道正在进行的题目时使用；VOLGENDE 必须仍为禁用状态。</p>
 <label>文件名前缀<input id="prefix" value="NT2_B2_Kort" maxlength="60"></label>

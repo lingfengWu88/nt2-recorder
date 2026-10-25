@@ -1,14 +1,44 @@
-let running=false,stopRequested=false,stream=null,recordingStream=null,output=null,active=null,segmentNumber=0,config=null,batch='',error=null;
+let running=false,stopRequested=false,stream=null,captureTabId=null,recordingStream=null,output=null,active=null,segmentNumber=0,config=null,batch='',error=null,retainCaptureForNextBatch=false;
 let cropVideo=null,cropCanvas=null,cropTimer=null,cropCanvasTrack=null;
-let events=[],eventWaiter=null,saves=[];
+let events=[],eventWaiter=null,saves=[],completed=false,batchComplete=false;
 async function rpc(type,args={}){const r=await chrome.runtime.sendMessage({to:'worker',type,...args});if(!r?.ok)throw Error(r?.error||'后台无响应');return r;}
-async function status(text){await rpc('status',{status:{text,running,time:Date.now()}});}
+async function status(text,phase='RECORDING'){await rpc('status',{status:{text,running,phase,time:Date.now()}});}
 function enqueue(event,reply){events.push({event,reply});eventWaiter?.();eventWaiter=null;}
 async function nextEvent(){if(events.length)return events.shift();await new Promise(resolve=>{eventWaiter=resolve;});return events.shift();}
+async function prepareCapture(streamId,tabId){
+  if(running)throw Error('录制正在运行，不能重新准备捕获流。');
+  if(stream){
+    if(captureTabId!==tabId)throw Error('已有捕获流属于其他标签页。');
+    return;
+  }
+  stream=await navigator.mediaDevices.getUserMedia({
+    audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:streamId}},
+    video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:streamId}}
+  });
+  captureTabId=tabId;
+  try{
+    if(!stream.getAudioTracks().length)throw Error('没有取得标签页音轨，已停止');
+    stream.getVideoTracks().forEach(track=>track.onended=()=>{if(running)enqueue({name:'error',message:'标签页视频录制流已结束'});});
+    stream.getAudioTracks().forEach(track=>track.onended=()=>{if(running)enqueue({name:'warning',message:'标签页音轨已结束；仍继续录制画面并等待 VOLGENDE 启用。'});});
+    output=new AudioContext();
+    output.createMediaStreamSource(stream).connect(output.destination);
+    await output.resume();
+  }catch(error){
+    await releaseCapture();
+    throw error;
+  }
+}
+async function releaseCapture(){
+  if(stream){stream.getTracks().forEach(track=>{track.onended=null;track.stop();});stream=null;}
+  captureTabId=null;
+  if(output){await output.close();output=null;}
+}
 function startSegment(){
   const mimeType=['video/webm;codecs=vp8,opus','video/webm'].find(type=>MediaRecorder.isTypeSupported(type));
   if(!mimeType)throw Error('浏览器不支持 WebM 录制');
-  const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond:1500000,audioBitsPerSecond:96000});
+  // Keep the captured resolution for readable text, but use a lower bitrate
+  // to substantially reduce each question clip's file size.
+  const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond:750000,audioBitsPerSecond:64000});
   let resolve,reject;
   const done=new Promise((a,b)=>{resolve=a;reject=b;});
   done.catch(()=>{});
@@ -34,7 +64,7 @@ async function stopSegment(partial=false){
   const filename=`NT2-recordings/${batch}/${config.prefix}_${String(index).padStart(4,'0')}${partial?'_partial':''}.webm`;
   const url=URL.createObjectURL(blob);
   const save=async()=>{
-    try{await status(`正在保存第 ${segmentIndex} 段：${filename}`);await rpc('download',{url,filename});}
+    try{await status(`正在保存第 ${segmentIndex} 段：${filename}`,'SAVING');await rpc('download',{url,filename});}
     finally{URL.revokeObjectURL(url);}
   };
   const job=save().catch(reason=>{error=reason.message;stopRequested=true;enqueue({name:'stop'});throw reason;});
@@ -94,8 +124,11 @@ async function handleEvent(event){
   if(event.name==='final-ready'){
     if(active)await stopSegment(false);
     await Promise.all(saves);
+    retainCaptureForNextBatch=Boolean(event.retainCaptureForNextBatch);
+    completed=event.workflowComplete!==false;
+    batchComplete=true;
     stopRequested=true;
-    await status(`已检测到最后一题状态。最终录制已保存，共 ${segmentNumber} 段；正在关闭考试页面。`);
+    await status(`已检测到最后一题状态。最终录制已保存，共 ${segmentNumber} 段；${retainCaptureForNextBatch?'正在准备下一批。':'考试录制已完成。'}`,'SAVING');
     return;
   }
   if(event.name==='enabled'){
@@ -109,18 +142,15 @@ async function handleEvent(event){
 }
 async function run(message,ready){
   config=message.config;batch=new Date().toISOString().replace(/[:.]/g,'-');
-  segmentNumber=0;error=null;saves=[];events=[];stopRequested=false;
+  segmentNumber=0;error=null;saves=[];events=[];stopRequested=false;retainCaptureForNextBatch=false;completed=false;batchComplete=false;
   let initialized=false;
   try{
-    // tabCapture uses Chromium's mandatory constraint format.
-    stream=await navigator.mediaDevices.getUserMedia({
-      audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId}},
-      video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId}}
-    });
-    if(!stream.getAudioTracks().length)throw Error('没有取得标签页音轨，已停止');
-    stream.getVideoTracks().forEach(track=>track.onended=()=>enqueue({name:'error',message:'标签页视频录制流已结束'}));
-    stream.getAudioTracks().forEach(track=>track.onended=()=>enqueue({name:'warning',message:'标签页音轨已结束；仍继续录制画面并等待 VOLGENDE 启用。'}));
-    output=new AudioContext();output.createMediaStreamSource(stream).connect(output.destination);await output.resume();
+    if(stream&&captureTabId!==message.tabId)throw Error('预先捕获的标签页与考试播放器不一致。');
+    if(!stream){
+      if(!message.streamId)throw Error('没有可复用的预先捕获流，也没有新的 Chrome stream ID。');
+      await prepareCapture(message.streamId,message.tabId);
+    }
+    if([...stream.getAudioTracks(),...stream.getVideoTracks()].some(track=>track.readyState==='ended'))throw Error('预先捕获的音频或视频流已结束。');
     await createCroppedRecordingStream(message.crop);
     startSegment();
     const cropInfo=`内容裁剪 x=${Math.round(message.crop.x)}, y=${Math.round(message.crop.y)}, ${Math.round(message.crop.width)}×${Math.round(message.crop.height)} / ${message.crop.viewportWidth}×${message.crop.viewportHeight}`;
@@ -140,15 +170,31 @@ async function run(message,ready){
   }finally{
     await Promise.allSettled(saves);
     releaseCrop();
-    if(stream){stream.getTracks().forEach(track=>{track.onended=null;track.stop();});stream=null;}
-    if(output){await output.close();output=null;}
+    if(!retainCaptureForNextBatch)await releaseCapture();
     running=false;active=null;
-    await status(`${error?'已中止：'+error:stopRequested?'已停止':'录制结束'}\n已完成第 ${segmentNumber} 段。请回听确认每题边界、画面和声音。`);
+    const phase=error?'ERROR':completed?'COMPLETED':batchComplete?'PORTAL_AUTOMATION':'IDLE';
+    const finalText=error?'已中止：'+error:completed?'全部题目录制完成':batchComplete?'当前批次已保存，准备下一批':'已停止';
+    await status(`${finalText}\n已完成第 ${segmentNumber} 段。请回听确认每题边界、画面和声音。`,phase);
   }
 }
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(message.to!=='offscreen')return;
-  if(message.type==='state'){reply({running});return;}
+  if(message.type==='state'){
+    reply({running,preparedTabId:captureTabId,captureActive:Boolean(stream&&stream.getTracks().length&&stream.getTracks().every(track=>track.readyState==='live'))});
+    return;
+  }
+  if(message.type==='prepare'){
+    prepareCapture(message.streamId,message.tabId)
+      .then(()=>reply({ok:true,preparedTabId:captureTabId,captureActive:Boolean(stream&&stream.getTracks().length&&stream.getTracks().every(track=>track.readyState==='live'))}))
+      .catch(error=>reply({ok:false,error:error.message||String(error)}));
+    return true;
+  }
+  if(message.type==='cancel-capture'){
+    if(running){reply({ok:false,error:'录制正在运行，不能取消捕获流。'});return;}
+    releaseCrop();
+    releaseCapture().then(()=>reply({ok:true}));
+    return true;
+  }
   if(message.type==='event'){
     if(['enabled','final-ready'].includes(message.event?.name)&&running){
       enqueue(message.event,reply);
@@ -158,7 +204,12 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     reply({ok:true});
     return;
   }
-  if(message.type==='stop'){enqueue({name:'stop'});reply({ok:true});return;}
+  if(message.type==='stop'){
+    if(running){enqueue({name:'stop'});reply({ok:true});return;}
+    releaseCrop();
+    releaseCapture().then(()=>reply({ok:true}));
+    return true;
+  }
   if(message.type==='start'){
     if(running){reply({ok:false,error:'已有任务'});return;}
     running=true;
