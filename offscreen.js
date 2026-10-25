@@ -1,67 +1,168 @@
-let running=false,stopRequested=false,recorder=null,stream=null,output=null,wake=null;
-const sleep=ms=>new Promise(r=>{const t=setTimeout(()=>{wake=null;r();},ms);wake=()=>{clearTimeout(t);wake=null;r();};});
+let running=false,stopRequested=false,stream=null,recordingStream=null,output=null,active=null,segmentNumber=0,config=null,batch='',error=null;
+let cropVideo=null,cropCanvas=null,cropTimer=null,cropCanvasTrack=null;
+let events=[],eventWaiter=null,saves=[];
 async function rpc(type,args={}){const r=await chrome.runtime.sendMessage({to:'worker',type,...args});if(!r?.ok)throw Error(r?.error||'后台无响应');return r;}
 async function status(text){await rpc('status',{status:{text,running,time:Date.now()}});}
-function recordSegment(){
-  const mimeType=['video/webm;codecs=vp8,opus','video/webm'].find(x=>MediaRecorder.isTypeSupported(x));
+function enqueue(event,reply){events.push({event,reply});eventWaiter?.();eventWaiter=null;}
+async function nextEvent(){if(events.length)return events.shift();await new Promise(resolve=>{eventWaiter=resolve;});return events.shift();}
+function startSegment(){
+  const mimeType=['video/webm;codecs=vp8,opus','video/webm'].find(type=>MediaRecorder.isTypeSupported(type));
   if(!mimeType)throw Error('浏览器不支持 WebM 录制');
-  const chunks=[];recorder=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:1500000,audioBitsPerSecond:96000});
+  const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond:1500000,audioBitsPerSecond:96000});
   let resolve,reject;
-  const result=new Promise((a,b)=>{resolve=a;reject=b;});
-  // Attach a handler immediately: errors may precede the later await.
-  result.catch(()=>{});
-  recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
-  recorder.onerror=e=>{stopRequested=true;wake?.();reject(Error(e.error?.message||'录制编码出错'));};
+  const done=new Promise((a,b)=>{resolve=a;reject=b;});
+  done.catch(()=>{});
+  recorder.ondataavailable=event=>{if(event.data.size)chunks.push(event.data);};
+  recorder.onerror=event=>{
+    const failure=Error(event.error?.message||'录制编码出错');
+    reject(failure);
+    enqueue({name:'error',message:failure.message});
+  };
   recorder.onstop=()=>resolve(new Blob(chunks,{type:mimeType}));
-  recorder.start(1000);return result;
+  recorder.start(1000);
+  active={recorder,done};
+  segmentNumber++;
 }
-async function run(m){
-  const cfg=m.config,batch=new Date().toISOString().replace(/[:.]/g,'-');
-  let completed=0,error=null;
-  try{
-    // tabCapture uses Chromium's mandatory constraint format. Do not mix
-    // standard constraints (e.g. frameRate) into the same audio/video object.
-    stream=await navigator.mediaDevices.getUserMedia({
-      audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:m.streamId}},
-      video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:m.streamId}}
-    });
-    if(!stream.getAudioTracks().length)throw Error('没有取得标签页音轨，已停止');
-    stream.getTracks().forEach(t=>t.onended=()=>{stopRequested=true;wake?.();});
-    output=new AudioContext();output.createMediaStreamSource(stream).connect(output.destination);await output.resume();
-    for(let i=0;i<cfg.count&&!stopRequested;i++){
-      await status(`正在录制 ${i+1}/${cfg.count}，编号 ${cfg.start+i}。每段 ${cfg.seconds} 秒。`);
-      const blobPromise=recordSegment();let segmentError=null;
-      try{
-        // Start recording BEFORE navigation/play so initial audio is retained.
-        if(i>0){await rpc('control',{tabId:m.tabId,text:cfg.nextText});await sleep(2000);}
-        if(!stopRequested&&cfg.playText)await rpc('control',{tabId:m.tabId,text:cfg.playText});
-        if(!stopRequested)await sleep(cfg.seconds*1000);
-      }catch(e){segmentError=e;}
-      if(recorder.state!=='inactive')recorder.stop();
-      const blob=await blobPromise;recorder=null;
-      if(blob.size<1024)throw Error('录制结果为空或过短，已停止');
-      const partial=stopRequested||segmentError;
-      const filename=`NT2-recordings/${batch}/${cfg.prefix}_${String(cfg.start+i).padStart(4,'0')}${partial?'_partial':''}.webm`;
-      const url=URL.createObjectURL(blob);
-      try{await status('正在保存：'+filename);await rpc('download',{url,filename});}finally{URL.revokeObjectURL(url);}
-      completed++;
-      if(segmentError)throw segmentError;
+async function stopSegment(partial=false){
+  if(!active)return;
+  const segment=active;active=null;
+  if(segment.recorder.state!=='inactive')segment.recorder.stop();
+  const blob=await segment.done;
+  if(blob.size<1024)throw Error('录制结果为空或过短，已停止');
+  const segmentIndex=segmentNumber;
+  const index=config.start+segmentIndex-1;
+  const filename=`NT2-recordings/${batch}/${config.prefix}_${String(index).padStart(4,'0')}${partial?'_partial':''}.webm`;
+  const url=URL.createObjectURL(blob);
+  const save=async()=>{
+    try{await status(`正在保存第 ${segmentIndex} 段：${filename}`);await rpc('download',{url,filename});}
+    finally{URL.revokeObjectURL(url);}
+  };
+  const job=save().catch(reason=>{error=reason.message;stopRequested=true;enqueue({name:'stop'});throw reason;});
+  saves.push(job);
+  return job;
+}
+async function createCroppedRecordingStream(crop){
+  const sourceVideo=stream.getVideoTracks()[0];
+  if(!sourceVideo)throw Error('标签页视频轨道不可用');
+  cropVideo=document.createElement('video');
+  cropVideo.muted=true;cropVideo.playsInline=true;cropVideo.srcObject=stream;
+  await cropVideo.play();
+  if(!cropVideo.videoWidth||!cropVideo.videoHeight)await new Promise((resolve,reject)=>{
+    cropVideo.onloadedmetadata=resolve;
+    cropVideo.onerror=()=>reject(Error('无法读取标签页视频尺寸'));
+  });
+  const scaleX=cropVideo.videoWidth/crop.viewportWidth,scaleY=cropVideo.videoHeight/crop.viewportHeight;
+  let sx=Math.round(crop.x*scaleX),sy=Math.round(crop.y*scaleY);
+  sx=Math.max(0,Math.min(cropVideo.videoWidth-1,sx));
+  sy=Math.max(0,Math.min(cropVideo.videoHeight-1,sy));
+  const sw=Math.min(Math.round(crop.width*scaleX),cropVideo.videoWidth-sx);
+  const sh=Math.min(Math.round(crop.height*scaleY),cropVideo.videoHeight-sy);
+  if(sw<2||sh<2)throw Error('播放器内容裁剪区域不在录制画面范围内');
+  cropCanvas=document.createElement('canvas');
+  cropCanvas.width=sw;cropCanvas.height=sh;
+  const context=cropCanvas.getContext('2d');
+  if(!context)throw Error('无法创建内容裁剪画布');
+  const paint=()=>{
+    if(!running)return;
+    try{
+      context.drawImage(cropVideo,sx,sy,sw,sh,0,0,sw,sh);
+      cropCanvasTrack?.requestFrame?.();
+    }catch(e){
+      enqueue({name:'error',message:`裁剪画面更新失败：${e.message}`});
     }
-  }catch(e){error=e.message;}
-  finally{
-    if(recorder&&recorder.state!=='inactive')recorder.stop();recorder=null;
-    if(stream){stream.getTracks().forEach(t=>{t.onended=null;t.stop();});stream=null;}
-    if(output){await output.close();output=null;}
-    running=false;
-    await status(`${error?'已中止：'+error:stopRequested?'已停止':'本批完成'}\n已保存 ${completed} 段。请回听验证声音，并核对是否漏题、重复或截断。`);
+  };
+  const canvasStream=cropCanvas.captureStream(0);
+  cropCanvasTrack=canvasStream.getVideoTracks()[0];
+  paint();
+  cropTimer=setInterval(paint,1000/30);
+  recordingStream=new MediaStream([...canvasStream.getVideoTracks(),...stream.getAudioTracks()]);
+}
+function releaseCrop(){
+  if(cropTimer)clearInterval(cropTimer);
+  cropTimer=null;
+  cropCanvasTrack=null;
+  if(recordingStream){recordingStream.getVideoTracks().forEach(track=>track.stop());recordingStream=null;}
+  if(cropVideo){cropVideo.pause();cropVideo.srcObject=null;cropVideo.remove();cropVideo=null;}
+  cropCanvas=null;
+}
+async function handleEvent(event){
+  if(event.name==='error')throw Error(event.message||'按钮状态监测失败');
+  if(event.name==='warning'){
+    await status(event.message);
+    return;
+  }
+  if(event.name==='final-ready'){
+    if(active)await stopSegment(false);
+    await Promise.all(saves);
+    stopRequested=true;
+    await status(`已检测到最后一题状态。最终录制已保存，共 ${segmentNumber} 段；正在关闭考试页面。`);
+    return;
+  }
+  if(event.name==='enabled'){
+    if(active){await stopSegment(false);await Promise.all(saves);await status(`已检测到 VOLGENDE 启用并保存第 ${segmentNumber} 段；正在进入下一题。`);}
+    return;
+  }
+  if(event.name==='next-click'){
+    if(active)await stopSegment(false); // Covers a rapid click arriving before the enabled notification.
+    if(!stopRequested){startSegment();await status(`正在录制第 ${segmentNumber} 题；结束时将根据 VOLGENDE 状态自动保存。`);}
   }
 }
-chrome.runtime.onMessage.addListener((m,s,reply)=>{
-  if(m.to!=='offscreen')return;
-  if(m.type==='state'){reply({running});return;}
-  if(m.type==='stop'){stopRequested=true;wake?.();reply({ok:true});return;}
-  if(m.type==='start'){
+async function run(message,ready){
+  config=message.config;batch=new Date().toISOString().replace(/[:.]/g,'-');
+  segmentNumber=0;error=null;saves=[];events=[];stopRequested=false;
+  let initialized=false;
+  try{
+    // tabCapture uses Chromium's mandatory constraint format.
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId}},
+      video:{mandatory:{chromeMediaSource:'tab',chromeMediaSourceId:message.streamId}}
+    });
+    if(!stream.getAudioTracks().length)throw Error('没有取得标签页音轨，已停止');
+    stream.getVideoTracks().forEach(track=>track.onended=()=>enqueue({name:'error',message:'标签页视频录制流已结束'}));
+    stream.getAudioTracks().forEach(track=>track.onended=()=>enqueue({name:'warning',message:'标签页音轨已结束；仍继续录制画面并等待 VOLGENDE 启用。'}));
+    output=new AudioContext();output.createMediaStreamSource(stream).connect(output.destination);await output.resume();
+    await createCroppedRecordingStream(message.crop);
+    startSegment();
+    const cropInfo=`内容裁剪 x=${Math.round(message.crop.x)}, y=${Math.round(message.crop.y)}, ${Math.round(message.crop.width)}×${Math.round(message.crop.height)} / ${message.crop.viewportWidth}×${message.crop.viewportHeight}`;
+    await status(`正在录制第 ${segmentNumber} 题。${cropInfo}。等待 VOLGENDE 从禁用变为启用。`);
+    initialized=true;ready();
+    while(!stopRequested){
+      const item=await nextEvent();
+      if(item.event.name==='stop'){item.reply?.({ok:true});stopRequested=true;break;}
+      try{await handleEvent(item.event);item.reply?.({ok:true});}
+      catch(reason){item.reply?.({ok:false,error:reason.message||String(reason)});throw reason;}
+    }
+    if(active)await stopSegment(true);
+  }catch(reason){
+    error=reason.message||String(reason);stopRequested=true;
+    if(!initialized)ready(reason);
+    try{if(active)await stopSegment(true);}catch(saveError){error+=`；当前片段保存失败：${saveError.message}`;}
+  }finally{
+    await Promise.allSettled(saves);
+    releaseCrop();
+    if(stream){stream.getTracks().forEach(track=>{track.onended=null;track.stop();});stream=null;}
+    if(output){await output.close();output=null;}
+    running=false;active=null;
+    await status(`${error?'已中止：'+error:stopRequested?'已停止':'录制结束'}\n已完成第 ${segmentNumber} 段。请回听确认每题边界、画面和声音。`);
+  }
+}
+chrome.runtime.onMessage.addListener((message,sender,reply)=>{
+  if(message.to!=='offscreen')return;
+  if(message.type==='state'){reply({running});return;}
+  if(message.type==='event'){
+    if(['enabled','final-ready'].includes(message.event?.name)&&running){
+      enqueue(message.event,reply);
+      return true;
+    }
+    if(running)enqueue(message.event);
+    reply({ok:true});
+    return;
+  }
+  if(message.type==='stop'){enqueue({name:'stop'});reply({ok:true});return;}
+  if(message.type==='start'){
     if(running){reply({ok:false,error:'已有任务'});return;}
-    running=true;stopRequested=false;reply({ok:true});run(m);
+    running=true;
+    run(message,reason=>reason?reply({ok:false,error:reason.message||String(reason)}):reply({ok:true}));
+    return true;
   }
 });

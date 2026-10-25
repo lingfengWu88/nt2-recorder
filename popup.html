@@ -1,16 +1,19 @@
 <!doctype html><html lang="zh"><meta charset="utf-8"><title>NT2 录制</title>
-<style>body{font:14px system-ui;width:350px;padding:16px;background:#f5f8f6;color:#16362c}h1{font-size:21px}label{display:block;margin:12px 0}input{box-sizing:border-box;width:100%;padding:8px;border:1px solid #b9cfc5;border-radius:6px;margin-top:4px}button{padding:10px;border:0;border-radius:7px;background:#16634d;color:white;cursor:pointer}#stop{background:#9c3939}p,small{line-height:1.6}#status{white-space:pre-wrap;background:white;padding:10px;border-radius:8px}button:disabled{opacity:.5}</style>
-<h1>NT2 分题录制 · 试用版</h1>
-<p>先进入一道题的播放页面，再打开此扩展。只录这个标签页及其声音，不录麦克风。</p>
+<style>body{font:14px system-ui;width:350px;padding:16px;background:#f5f8f6;color:#16362c}h1{font-size:21px}h2{font-size:16px;margin:18px 0 8px}label{display:block;margin:12px 0}input,select,textarea{box-sizing:border-box;width:100%;padding:8px;border:1px solid #b9cfc5;border-radius:6px;margin-top:4px;background:white}textarea{min-height:92px;resize:vertical}button{padding:10px;border:0;border-radius:7px;background:#16634d;color:white;cursor:pointer}#autoStart{background:#215d8f}#stop{background:#9c3939}p,small{line-height:1.6}#status{white-space:pre-wrap;background:white;padding:10px;border-radius:8px;min-height:40px}button:disabled{opacity:.5}</style>
+<h1>NT2 分题录制</h1>
+<h2>自动选题并开始</h2>
+<p>可从任意浏览器标签页启动。扩展自动打开官方页面，依次设置 Programma/onderdeel、等待并设置 Soort opdracht，确认两项后点击 Zoek，再选择全部匹配题目。</p>
+<label>口语项目<select id="program"><option>Programma I Spreken</option><option selected>Programma II Spreken</option></select></label>
+<label>题型<select id="kind"><option value="default">Alle soorten</option><option>Kort</option><option>Lang</option><option>Middellang</option></select></label>
+<p><button id="autoStart">选择全部匹配题目并录制</button></p>
+<small>会跳过声音示例并直接点击 Geluid is goed；随后处理麦克风检查并点击 Opname is goed，再点击各页的 VOLGENDE（包括 Start 页）。确认进入 Vraag 1 后才开始录制。浏览器若询问麦克风权限，请在系统提示中允许。</small>
+<small>官网每场最多选择 100 道题。若匹配题目超过 100 道，扩展会分成多场自动完成；每场结束后保存并关闭播放器，再自动启动下一批。编号连续递增。新打开的官网页面会先等待筛选器完成加载。</small>
+<h2>已打开考试：仅开始录制</h2>
+<p>已在一道正在进行的题目时使用；VOLGENDE 必须仍为禁用状态。</p>
 <label>文件名前缀<input id="prefix" value="NT2_B2_Kort" maxlength="60"></label>
 <label>起始编号<input id="start" type="number" min="1" max="99999" value="1"></label>
-<label>本批题数（先录 1 题验证）<input id="count" type="number" min="1" max="20" value="1"></label>
-<label>每题录制秒数（包含播放、准备和答题时间）<input id="seconds" type="number" min="10" max="600" value="90"></label>
-<label>下一题按钮的完整文字（批量时必填）<input id="nextText" placeholder="按网页实际文字填写，不要猜"></label>
-<label>播放按钮的完整文字（可选）<input id="playText" placeholder="空白：第一题自行点击，后续须自动播放"></label>
-<small>批量模式按固定时长翻题，不识别音频结束。下一题开始时也会保留切换画面。先分题型录制；暂不支持需重复确认、整页跳转或跨域嵌套按钮。</small>
-<p><button id="check">检查按钮（不点击）</button></p>
-<p><button id="startBtn">开始录制</button> <button id="stop">停止并保存当前段</button></p>
+<small>检测到 VOLGENDE 从禁用变为启用时，会结束并保存该题；保存完成后扩展会重新确认按钮唯一且可用，再自动点击进入下一题并录制下一段。最后一题确认 Vraag N van N、VOLGENDE 不存在或禁用且 INLEVEREN 可用后，扩展保存最终片段并关闭此标签页，不会点击 INLEVEREN。Stop 可随时停止。</small>
+<p><button id="startBtn">开始录制当前考试</button> <button id="stop">停止并保存当前段</button></p>
 <div id="status">准备就绪</div>
-<p><small>视频保存到“下载/NT2-recordings/批次时间/”，格式 WebM，VLC 可播放。请保持电脑唤醒、题目标签页前台显示。</small></p>
+<p><small>内容视频以 WebM 格式保存到“下载/NT2-recordings/批次时间/”。请保持电脑唤醒、题目标签页打开。无法定位可见题目内容时扩展会拒绝录制，避免保存整页。</small></p>
 <script src="popup.js"></script></html>

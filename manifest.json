@@ -1,10 +1,14 @@
 {
   "manifest_version": 3,
   "name": "NT2 本地分题录制",
-  "version": "0.1.2",
+  "version": "0.4.11",
   "minimum_chrome_version": "116",
-  "description": "录制你主动选择的 NT2 题目标签页；定时分段、本地保存。",
-  "permissions": ["activeTab", "scripting", "tabCapture", "offscreen", "downloads", "storage"],
+  "description": "按指定口语题目自动启动 NT2 练习、通过设置页并录制分题视频。",
+  "permissions": ["activeTab", "tabs", "scripting", "tabCapture", "offscreen", "downloads", "storage"],
+  "host_permissions": [
+    "https://oefenexamensnt2.nl/*",
+    "https://nt2-oefenomgeving.facet.onl/*"
+  ],
   "action": {"default_popup": "popup.html"},
   "background": {"service_worker": "worker.js"}
 }
