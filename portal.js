@@ -10,7 +10,14 @@ function rowsOnPage() {
     if (!checkbox || !firstCell) return null;
     const title = firstCell.innerText.replace(/^\s*Selecteer\s+rij\s+\d+\s*/i, '').trim();
     const typeCell = row.querySelectorAll('td,[role="cell"]')[1];
-    return title ? { title, checkbox, kind: String(typeCell?.innerText || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase() } : null;
+    const rowKey=checkbox.getAttribute('data-id')||checkbox.getAttribute('data-key')||row.getAttribute('data-id')||row.getAttribute('data-key')||checkbox.value||'';
+    return title ? {
+      title,
+      checkbox,
+      element:row,
+      rowKey,
+      kind:String(typeCell?.innerText || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase()
+    } : null;
   }).filter(Boolean);
 }
 
@@ -133,13 +140,20 @@ function findNextPageButton() {
       rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
   });
 }
-function pageSignature() {
-  return rowsOnPage().map(row => normalize(row.title)).join('|');
+function pageSignature(rows=rowsOnPage()) {
+  return JSON.stringify(rows.map((row,rowIndex)=>[
+    rowIndex,
+    normalize(row.title),
+    row.kind,
+    row.rowKey
+  ]));
 }
-async function waitForPageSignature(signature, timeout = 15000) {
+async function waitForPageSignature(signature, previousRows=null, timeout = 15000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (pageSignature() === signature) return;
+    const rows=rowsOnPage();
+    const rerendered=!previousRows||rows.length!==previousRows.length||rows.some((row,index)=>row.element!==previousRows[index]?.element);
+    if (pageSignature(rows) === signature&&rerendered) return;
     await delay(150);
   }
   throw Error('官网重新搜索后没有返回题目列表首页。');
@@ -148,13 +162,16 @@ async function waitForPageSignature(signature, timeout = 15000) {
 async function advancePage() {
   const next = findNextPageButton();
   if (!next) return false;
-  const before = rowsOnPage().map(row => normalize(row.title)).join('|');
+  const beforeRows=rowsOnPage();
+  const before=pageSignature(beforeRows);
   next.click();
   const deadline = Date.now() + 10000;
   while (Date.now() < deadline) {
     await delay(150);
-    const after = rowsOnPage().map(row => normalize(row.title)).join('|');
-    if (after && after !== before) return true;
+    const afterRows=rowsOnPage();
+    const after=pageSignature(afterRows);
+    const rerendered=afterRows.length!==beforeRows.length||afterRows.some((row,index)=>row.element!==beforeRows[index]?.element);
+    if (afterRows.length&&(after!==before||rerendered)) return true;
   }
   throw Error('点击“Volgende Pagina”后列表没有更新。');
 }
@@ -183,42 +200,59 @@ async function prepare(message) {
   await waitForFilteredRows(expectedKind);
   const firstPageSignature = pageSignature();
 
-  const locations = new Map();
+  const allQuestions=[];
+  const pageSignatures=[];
   let page = 1;
   while (page <= 100) {
-    for (const row of rowsOnPage()) {
-      const key = normalize(row.title);
-      if (locations.has(key)) throw Error(`标题“${row.title}”重复出现，无法安全地唯一选择。`);
-      locations.set(key, { page, title: row.title, kind: row.kind });
-    }
+    const rows=rowsOnPage();
+    pageSignatures[page-1]=pageSignature(rows);
+    rows.forEach((row,rowIndex)=>allQuestions.push({page,rowIndex,title:row.title,kind:row.kind,rowKey:row.rowKey}));
     if (!(await advancePage())) break;
     page++;
     await waitForFilteredRows(expectedKind);
-    await report(`正在统计匹配题目：第 ${page} 页，已找到 ${locations.size} 道……`);
+    await report(`正在统计匹配题目：第 ${page} 页，已找到 ${allQuestions.length} 道……`);
   }
 
-  if (!locations.size) throw Error('此项目和题型下没有找到可选题目。');
-  const allTitles=[...locations.values()].map(item=>item.title);
-  const selectedTitles=Array.isArray(config.selectionTitles)?config.selectionTitles.map(String):allTitles.slice(0,100);
-  if(!selectedTitles.length)throw Error('没有待选择的匹配题目。');
-  if(selectedTitles.length>100)throw Error('官网每场最多允许选择 100 道题。');
-  const missing=selectedTitles.filter(title=>!locations.has(normalize(title)));
-  if(missing.length)throw Error(`批次中有 ${missing.length} 道题不属于本次项目/题型筛选，未启动。`);
+  if (!allQuestions.length) throw Error('此项目和题型下没有找到可选题目。');
+  const requestedQuestions=Array.isArray(config.selectionQuestions)?config.selectionQuestions:allQuestions.slice(0,100);
+  if(!requestedQuestions.length)throw Error('没有待选择的匹配题目。');
+  if(requestedQuestions.length>100)throw Error('官网每场最多允许选择 100 道题。');
+  const requestedIdentities=new Set();
+  const selectedQuestions=requestedQuestions.map(requested=>{
+    if(!requested||!Number.isInteger(requested.page)||!Number.isInteger(requested.rowIndex))throw Error('题目批次缺少有效的页码/行位置；未启动。');
+    const identity=`${requested.page}:${requested.rowIndex}`;
+    if(requestedIdentities.has(identity))throw Error(`批次重复包含第 ${requested.page} 页第 ${requested.rowIndex+1} 行；未启动。`);
+    requestedIdentities.add(identity);
+    const actual=allQuestions.find(question=>question.page===requested.page&&question.rowIndex===requested.rowIndex);
+    if(!actual||normalize(actual.title)!==normalize(requested.title)||actual.kind!==requested.kind||actual.rowKey!==String(requested.rowKey||'')){
+      throw Error(`第 ${requested.page} 页第 ${requested.rowIndex+1} 行与已核对题目不一致（${requested.title||'标题未知'}）；未启动。`);
+    }
+    return actual;
+  });
 
   // Run the same official search again to reset pagination, then select every verified row.
-  search.click();
-  await waitForPageSignature(firstPageSignature);
-  await waitForFilteredRows(expectedKind);
+  if(page>1){
+    const previousRows=rowsOnPage();
+    search.click();
+    await waitForPageSignature(firstPageSignature,previousRows);
+    await waitForFilteredRows(expectedKind);
+  }else if(pageSignature()!==firstPageSignature){
+    throw Error('题目列表在核对后发生变化；没有启动考试。');
+  }
   const byPage = new Map();
-  for (const title of selectedTitles) {
-    const item=locations.get(normalize(title));
+  for (const question of selectedQuestions) {
+    const item=question;
     if (!byPage.has(item.page)) byPage.set(item.page, []);
     byPage.get(item.page).push(item);
   }
   for (let currentPage = 1; currentPage <= Math.max(...byPage.keys()); currentPage++) {
+    const rows=rowsOnPage();
+    if(pageSignature(rows)!==pageSignatures[currentPage-1])throw Error(`第 ${currentPage} 页题目列表与初次核对不一致；没有启动考试。`);
     for (const item of byPage.get(currentPage) || []) {
-      const row = rowsOnPage().find(candidate => normalize(candidate.title) === normalize(item.title)&&candidate.kind===item.kind);
-      if (!row) throw Error(`第 ${currentPage} 页重新加载后找不到“${item.title}”；没有启动考试。`);
+      const row=rows[item.rowIndex];
+      if(!row||normalize(row.title)!==normalize(item.title)||row.kind!==item.kind||row.rowKey!==item.rowKey){
+        throw Error(`第 ${currentPage} 页第 ${item.rowIndex+1} 行与已核对题目不一致（${item.title}）；没有启动考试。`);
+      }
       if (!row.checkbox.checked) row.checkbox.click();
     }
     if (currentPage < Math.max(...byPage.keys()) && !(await advancePage())) {
@@ -228,9 +262,9 @@ async function prepare(message) {
 
   const summaryText = normalize(document.body.innerText);
   const selectedCount = Number(summaryText.match(/aantal geselecteerde opgave\(n\):\s*(\d+)/)?.[1]);
-  if (selectedCount !== selectedTitles.length) throw Error(`官网显示已选 ${Number.isFinite(selectedCount) ? selectedCount : '未知'} 道，当前批次应为 ${selectedTitles.length} 道；没有启动。`);
-  await report(`已按项目和题型选择本批 ${selectedTitles.length} 道，共 ${allTitles.length} 道匹配题目。`);
-  return { count: selectedTitles.length, titles: selectedTitles, allTitles };
+  if (selectedCount !== selectedQuestions.length) throw Error(`官网显示已选 ${Number.isFinite(selectedCount) ? selectedCount : '未知'} 道，当前批次应为 ${selectedQuestions.length} 道；没有启动。`);
+  await report(`已按项目和题型选择本批 ${selectedQuestions.length} 道，共 ${allQuestions.length} 道匹配题目。`);
+  return { count: selectedQuestions.length, questions:selectedQuestions, allQuestions };
 }
 
 // Expose a harmless, read-only readiness response for the worker's startup check.

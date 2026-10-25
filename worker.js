@@ -177,20 +177,21 @@ async function waitForNewPlayer(portalTabId,beforeIds){
   }
   throw Error('Start 已点击，但未找到 NT2 播放器页面。请确认浏览器没有拦截新标签页。');
 }
-async function automatePortal(tabId,config,selectionTitles=null,allTitles=null,batchOffset=0){
+async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=null,batchOffset=0){
   if(!isPortalPage((await chrome.tabs.get(tabId)).url))throw Error('请先打开官方“Opdrachten oefenen”题目选择页。');
   await chrome.scripting.executeScript({target:{tabId},files:['portal.js']});
   await delay(300);
   await setAutomationStatus('正在核对项目、题型和题目标题……',true,'PORTAL_AUTOMATION');
-  const prepared=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'prepare',config:{...config,...(selectionTitles?{selectionTitles}: {})}});
+  const prepared=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'prepare',config:{...config,...(selectionQuestions?{selectionQuestions}: {})}});
   if(!prepared?.ok)throw Error(prepared?.error||'题目选择失败');
-  allTitles=allTitles||prepared.allTitles;
+  allQuestions=allQuestions||prepared.allQuestions;
+  if(!Array.isArray(allQuestions)||!allQuestions.length)throw Error('官网题目清单无效或为空；没有启动考试。');
   const nextIndex=batchOffset+prepared.count;
   const nextPortalTabId=null;
   const recordingConfig={...config,start:Number(config.start)+batchOffset};
-  await chrome.storage.session.set({automation:{config,allTitles,nextIndex,portalTabId:nextPortalTabId}});
-  const batchNumber=Math.floor(batchOffset/100)+1,totalBatches=Math.ceil(allTitles.length/100);
-  await setAutomationStatus(`已选择第 ${batchNumber}/${totalBatches} 批 ${prepared.count} 道题（筛选共 ${allTitles.length} 道）；正在启动官方考试页面……`);
+  await chrome.storage.session.set({automation:{config,allQuestions,nextIndex,portalTabId:nextPortalTabId}});
+  const batchNumber=Math.floor(batchOffset/100)+1,totalBatches=Math.ceil(allQuestions.length/100);
+  await setAutomationStatus(`已选择第 ${batchNumber}/${totalBatches} 批 ${prepared.count} 道题（筛选共 ${allQuestions.length} 道）；正在启动官方考试页面……`);
   const beforeTabs=await chrome.tabs.query({currentWindow:true});
   const beforeIds=new Set(beforeTabs.map(tab=>tab.id));
   const started=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'start'});
@@ -232,15 +233,16 @@ async function automatePortal(tabId,config,selectionTitles=null,allTitles=null,b
 async function startNextAutomationBatch(completedPlayerTabId){
   const {automation}=await chrome.storage.session.get('automation');
   if(!automation)return false;
-  if(automation.nextIndex>=automation.allTitles.length){
+  if(!Array.isArray(automation.allQuestions))throw Error('批次题目清单格式已过期；请重新启动自动流程。');
+  if(automation.nextIndex>=automation.allQuestions.length){
     await chrome.storage.session.remove('automation');
-    await setAutomationStatus(`全部 ${automation.allTitles.length} 道匹配题目已完成录制。`,false);
+    await setAutomationStatus(`全部 ${automation.allQuestions.length} 道匹配题目已完成录制。`,false);
     return false;
   }
   const portalTabId=completedPlayerTabId;
   const offset=automation.nextIndex;
-  const selectionTitles=automation.allTitles.slice(offset,offset+100);
-  await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionTitles.length} / ${automation.allTitles.length}……`,true,'PORTAL_AUTOMATION');
+  const selectionQuestions=automation.allQuestions.slice(offset,offset+100);
+  await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionQuestions.length} / ${automation.allQuestions.length}……`,true,'PORTAL_AUTOMATION');
   console.info('[NT2 Recorder] Reusing the completed player tab for the next batch to preserve its tab-scoped capture authorization.',{completedPlayerTabId,portalTabId,offset});
   await chrome.tabs.update(portalTabId,{url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten'});
   const deadline=Date.now()+30000;
@@ -251,7 +253,7 @@ async function startNextAutomationBatch(completedPlayerTabId){
   }
   const portalTab=await chrome.tabs.get(portalTabId);
   if(!isPortalPage(portalTab.url)||portalTab.status!=='complete')throw Error('无法在已授权的播放器标签页打开下一批题目选择页。');
-  await automatePortal(portalTabId,automation.config,selectionTitles,automation.allTitles,offset);
+  await automatePortal(portalTabId,automation.config,selectionQuestions,automation.allQuestions,offset);
   return true;
 }
 async function findNextButton(tabId){
@@ -416,7 +418,7 @@ async function handle(m,s){
           let recorderEvent=event;
           if(event.name==='final-ready'){
             const {automation}=await chrome.storage.session.get('automation');
-            const hasNextBatch=Boolean(automation&&automation.nextIndex<automation.allTitles.length);
+            const hasNextBatch=Boolean(automation?.allQuestions&&automation.nextIndex<automation.allQuestions.length);
             recorderEvent={...event,retainCaptureForNextBatch:hasNextBatch,workflowComplete:!hasNextBatch};
           }
           const saved=await chrome.runtime.sendMessage({to:'offscreen',type:'event',event:recorderEvent});
