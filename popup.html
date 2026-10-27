@@ -7,14 +7,16 @@
 <label>题型<select id="kind"><option value="default">Alle soorten</option><option>Kort</option><option>Lang</option><option>Middellang</option></select></label>
 <label>每场题目数（1–100）<input id="batchSize" type="number" min="1" max="100" step="1" value="20" required></label>
 <label>每次运行批次数（1–100）<input id="batchesPerRun" type="number" min="1" max="100" step="1" value="5" required></label>
+<label>视频帧率<select id="videoFps"><option value="2">2 fps</option><option value="5" selected>5 fps（默认）</option><option value="10">10 fps</option><option value="15">15 fps</option><option value="20">20 fps</option><option value="30">30 fps</option></select></label>
+<label>音频码率<select id="audioBitrate"><option value="24000">24 kbps</option><option value="48000" selected>48 kbps（默认）</option><option value="64000">64 kbps</option><option value="96000">96 kbps</option></select></label>
 <p><button id="autoStart">选择题目并进入考试</button></p>
 <small>扩展会在导航前按 Chrome 授权准备当前标签页捕获流，但到 Vraag 1 才开始保存视频。之后跳过声音示例、完成麦克风检查并进入 Vraag 1 时，会从该既有流自动开始录制。请从官方题目选择页启动，并确保考试仍在同一标签页、同一网站来源；从新标签页/其他网站启动无法授权捕获官方页面。浏览器若询问麦克风权限，请在系统提示中允许。</small>
-<small>设置每场题目数及每次运行批次数（默认 20 题、5 批）。达到批次数后，扩展保存进度并暂停；点击“继续”可从下一批恢复。浏览器重启后，请先打开官方题目选择页，再点击继续以重新授权捕获。中断中的批次会完整重做。</small>
+<small>设置视频帧率（默认 5 fps）和音频码率（默认 48 kbps）。较高值会提升流畅度/声音质量并增加文件大小；500 KiB 目标为近似值，必要时优先保留所选质量。设置每场题目数及每次运行批次数（默认 20 题、5 批）。达到批次数后，扩展保存进度并暂停；点击“继续”可从下一批恢复。浏览器重启后，请先打开官方题目选择页，再点击继续以重新授权捕获。中断中的批次会完整重做。</small>
 <section id="checkpointPanel" hidden>
 <h2>已保存的自动流程</h2>
 <p id="checkpointSummary"></p>
 <p><button id="resumeBtn">继续已保存流程</button> <button id="startOverBtn">重新开始</button></p>
-<small>继续时使用原来的项目、题型、批次设置、文件名前缀和编号；重新开始会清除旧进度并使用上方当前设置。</small>
+<small>继续时使用原来的项目、题型、批次设置、质量设置、文件名前缀和编号；重新开始会清除旧进度并使用上方当前设置。</small>
 </section>
 <h2>已打开考试：仅开始录制</h2>
 <p>已在一道正在进行的题目时使用；VOLGENDE 必须仍为禁用状态。</p>
@@ -23,5 +25,5 @@
 <small>检测到 VOLGENDE 从禁用变为启用时，会结束并保存该题；保存完成后扩展会重新确认按钮唯一且可用，再自动点击进入下一题并录制下一段。最后一题确认 Vraag N van N、VOLGENDE 不存在或禁用且 INLEVEREN 可用后，扩展保存最终片段并关闭此标签页，不会点击 INLEVEREN。Stop 可随时停止。</small>
 <p><button id="startBtn">开始录制当前考试</button> <button id="stop">停止并保存当前段</button></p>
 <div id="status">准备就绪</div>
-<p><small>内容视频以高压缩 WebM 格式保存到“下载/NT2-recordings/批次时间/”，目标约 500 KB/段；首段按 2 分钟估算，之后根据上一段时长调整。画面约 5 fps、音频约 24 kbps，动态画面会不流畅，文字/声音质量可能下降；长片段也可能超过目标。请先试录并回放确认内容可辨认。请保持电脑唤醒、题目标签页打开。无法定位可见题目内容时扩展会拒绝录制，避免保存整页。</small></p>
+<p><small>内容视频以高压缩 WebM 格式保存到“下载/NT2-recordings/批次时间/”，目标约 500 KB/段；首段按 2 分钟估算，之后根据上一段时长调整。帧率和音频码率可在上方设置；高质量或长片段可能超过目标大小。请先试录并回放确认内容可辨认。请保持电脑唤醒、题目标签页打开。无法定位可见题目内容时扩展会拒绝录制，避免保存整页。</small></p>
 <script src="popup.js"></script></html>

@@ -5,6 +5,13 @@ const MAX_AUTOMATION_BATCH_SIZE=100;
 const DEFAULT_BATCHES_PER_RUN=5;
 const MAX_BATCHES_PER_RUN=100;
 const AUTOMATION_CHECKPOINT_KEY='automationCheckpoint';
+const VIDEO_FPS_PRESETS=[2,5,10,15,20,30];
+const AUDIO_BITRATE_PRESETS=[24000,48000,64000,96000];
+function presetOf(value,presets,fallback,label){
+  const parsed=Number(value??fallback);
+  if(!presets.includes(parsed))throw Error(`${label}设置无效；请从扩展提供的预设中选择。`);
+  return parsed;
+}
 function isAllowedPage(address){
   try{
     const url=new URL(address);
@@ -23,7 +30,13 @@ function isPortalPage(address){
 function configOf(c){
   const start=Number(c.start);
   if(!Number.isInteger(start)||start<1||start>99999)throw Error('起始编号必须在 1–99999 之间');
-  return {prefix:safeName(c.prefix),start};
+  return {
+    ...c,
+    prefix:safeName(c.prefix),
+    start,
+    videoFps:presetOf(c.videoFps,VIDEO_FPS_PRESETS,5,'视频帧率'),
+    audioBitrate:presetOf(c.audioBitrate,AUDIO_BITRATE_PRESETS,48000,'音频码率')
+  };
 }
 function automationBatchSizeOf(value){
   const batchSize=Number(value??DEFAULT_AUTOMATION_BATCH_SIZE);

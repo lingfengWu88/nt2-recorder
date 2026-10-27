@@ -1,14 +1,18 @@
 const ids=['prefix','start'];
 const $=id=>document.getElementById(id);
+const DEFAULT_VIDEO_FPS=5;
+const DEFAULT_AUDIO_BITRATE=48000;
 const ready=(async()=>{
-  const {config,autoConfig}=await chrome.storage.local.get(['config','autoConfig']);
+  const {config,autoConfig,qualityConfig}=await chrome.storage.local.get(['config','autoConfig','qualityConfig']);
   if(config)for(const id of ids)$(id).value=config[id];
-  if(autoConfig){$('program').value=autoConfig.program||$('program').value;$('kind').value=autoConfig.kind||'default';$('batchSize').value=autoConfig.batchSize||20;$('batchesPerRun').value=autoConfig.batchesPerRun||5;}
+  if(autoConfig){$('program').value=autoConfig.program||$('program').value;$('kind').value=autoConfig.kind||'default';$('batchSize').value=autoConfig.batchSize||20;$('batchesPerRun').value=autoConfig.batchesPerRun||5;$('videoFps').value=String(autoConfig.videoFps||qualityConfig?.videoFps||DEFAULT_VIDEO_FPS);$('audioBitrate').value=String(autoConfig.audioBitrate||qualityConfig?.audioBitrate||DEFAULT_AUDIO_BITRATE);}
+  else{$('videoFps').value=String(qualityConfig?.videoFps||DEFAULT_VIDEO_FPS);$('audioBitrate').value=String(qualityConfig?.audioBitrate||DEFAULT_AUDIO_BITRATE);}
 })();
 async function request(type){
   try{
     await ready;
-    const config=Object.fromEntries(ids.map(id=>[id,$(id).value]));
+    const config={...Object.fromEntries(ids.map(id=>[id,$(id).value])),videoFps:Number($('videoFps').value),audioBitrate:Number($('audioBitrate').value)};
+    await chrome.storage.local.set({qualityConfig:{videoFps:config.videoFps,audioBitrate:config.audioBitrate}});
     const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
     const response=await chrome.runtime.sendMessage({to:'worker',type,tabId:tab.id,config});
     if(!response?.ok)throw Error(response?.error||'扩展无响应');
@@ -43,9 +47,11 @@ async function launchNewRun(replaceCheckpoint){
     prefix:$('prefix').value,
     start:$('start').value,
     batchSize:Number($('batchSize').value),
-    batchesPerRun:Number($('batchesPerRun').value)
+    batchesPerRun:Number($('batchesPerRun').value),
+    videoFps:Number($('videoFps').value),
+    audioBitrate:Number($('audioBitrate').value)
   };
-  await chrome.storage.local.set({autoConfig:{program:config.program,kind:config.kind,batchSize:config.batchSize,batchesPerRun:config.batchesPerRun}});
+  await chrome.storage.local.set({autoConfig:{program:config.program,kind:config.kind,batchSize:config.batchSize,batchesPerRun:config.batchesPerRun,videoFps:config.videoFps,audioBitrate:config.audioBitrate},qualityConfig:{videoFps:config.videoFps,audioBitrate:config.audioBitrate}});
   const response=await chrome.runtime.sendMessage({to:'worker',type:'auto-start',tabId:tab.id,config,replaceCheckpoint});
   if(!response?.ok)throw Error(response?.error||'自动流程失败');
   $('status').textContent=response.message||'流程已启动';

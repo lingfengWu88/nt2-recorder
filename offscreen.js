@@ -37,10 +37,10 @@ async function releaseCapture(){
 function startSegment(){
   const mimeType=['video/webm;codecs=vp8,opus','video/webm'].find(type=>MediaRecorder.isTypeSupported(type));
   if(!mimeType)throw Error('浏览器不支持 WebM 录制');
-  // Aim for ~500 KiB per segment using the last segment's duration. The first
-  // segment assumes two minutes; a minimum audio/video rate avoids unusable output.
+  // Aim for ~500 KiB per segment, while preserving the configured audio rate
+  // and a minimum video rate. High-quality or long segments may exceed target.
   const targetBitsPerSecond=500*1024*8*0.9/(estimatedSegmentDurationMs/1000);
-  const audioBitsPerSecond=24000;
+  const audioBitsPerSecond=Number(config.audioBitrate)||48000;
   const videoBitsPerSecond=Math.max(8000,Math.floor(targetBitsPerSecond-audioBitsPerSecond));
   const chunks=[],recorder=new MediaRecorder(recordingStream,{mimeType,videoBitsPerSecond,audioBitsPerSecond});
   let resolve,reject;
@@ -112,7 +112,8 @@ async function createCroppedRecordingStream(crop){
   paint();
   // A low frame rate preserves readable static question cards at the small
   // target bitrate; animated UI will appear less smooth.
-  cropTimer=setInterval(paint,1000/5);
+  const videoFps=Number(config.videoFps)||5;
+  cropTimer=setInterval(paint,1000/videoFps);
   recordingStream=new MediaStream([...canvasStream.getVideoTracks(),...stream.getAudioTracks()]);
 }
 function releaseCrop(){
