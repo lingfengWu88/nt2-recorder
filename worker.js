@@ -2,6 +2,9 @@ let starting=false;
 const advancing=new Map();
 const DEFAULT_AUTOMATION_BATCH_SIZE=20;
 const MAX_AUTOMATION_BATCH_SIZE=100;
+const DEFAULT_BATCHES_PER_RUN=5;
+const MAX_BATCHES_PER_RUN=100;
+const AUTOMATION_CHECKPOINT_KEY='automationCheckpoint';
 function isAllowedPage(address){
   try{
     const url=new URL(address);
@@ -26,6 +29,18 @@ function automationBatchSizeOf(value){
   const batchSize=Number(value??DEFAULT_AUTOMATION_BATCH_SIZE);
   if(!Number.isInteger(batchSize)||batchSize<1||batchSize>MAX_AUTOMATION_BATCH_SIZE)throw Error(`每场题目数必须是 1–${MAX_AUTOMATION_BATCH_SIZE} 之间的整数。`);
   return batchSize;
+}
+function batchesPerRunOf(value){
+  const batchesPerRun=Number(value??DEFAULT_BATCHES_PER_RUN);
+  if(!Number.isInteger(batchesPerRun)||batchesPerRun<1||batchesPerRun>MAX_BATCHES_PER_RUN)throw Error(`每次运行批次数必须是 1–${MAX_BATCHES_PER_RUN} 之间的整数。`);
+  return batchesPerRun;
+}
+async function saveAutomationCheckpoint(checkpoint){
+  await chrome.storage.local.set({[AUTOMATION_CHECKPOINT_KEY]:{...checkpoint,updatedAt:Date.now()}});
+}
+async function getAutomationCheckpoint(){
+  const data=await chrome.storage.local.get(AUTOMATION_CHECKPOINT_KEY);
+  return data[AUTOMATION_CHECKPOINT_KEY]||null;
 }
 async function setAutomationStatus(text,running=true,phase='PORTAL_AUTOMATION'){
   await chrome.storage.local.set({status:{text,running,phase,time:Date.now()}});
@@ -184,20 +199,25 @@ async function waitForNewPlayer(portalTabId,beforeIds){
   }
   throw Error('Start 已点击，但未找到 NT2 播放器页面。请确认浏览器没有拦截新标签页。');
 }
-async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=null,batchOffset=0){
+async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=null,batchOffset=0,batchesThisRun=0,expectedQuestions=null){
   const batchSize=automationBatchSizeOf(config.batchSize);
   if(!isPortalPage((await chrome.tabs.get(tabId)).url))throw Error('请先打开官方“Opdrachten oefenen”题目选择页。');
   await chrome.scripting.executeScript({target:{tabId},files:['portal.js']});
   await delay(300);
   await setAutomationStatus('正在核对项目、题型和题目标题……',true,'PORTAL_AUTOMATION');
-  const prepared=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'prepare',config:{...config,...(selectionQuestions?{selectionQuestions}: {})}});
+  const prepared=await chrome.tabs.sendMessage(tabId,{to:'portal',type:'prepare',config:{...config,...(selectionQuestions?{selectionQuestions}: {}),...(expectedQuestions?{expectedQuestions}: {})}});
   if(!prepared?.ok)throw Error(prepared?.error||'题目选择失败');
   allQuestions=allQuestions||prepared.allQuestions;
   if(!Array.isArray(allQuestions)||!allQuestions.length)throw Error('官网题目清单无效或为空；没有启动考试。');
+  if(!expectedQuestions){
+    const checkpoint=await getAutomationCheckpoint();
+    if(!checkpoint){
+      await saveAutomationCheckpoint({config,allQuestions,nextQuestionOffset:batchOffset,completedBatches:Math.ceil(batchOffset/batchSize)});
+    }
+  }
   const nextIndex=batchOffset+prepared.count;
-  const nextPortalTabId=null;
   const recordingConfig={...config,start:Number(config.start)+batchOffset};
-  await chrome.storage.session.set({automation:{config,allQuestions,nextIndex,portalTabId:nextPortalTabId}});
+  await chrome.storage.session.set({automation:{config,allQuestions,nextIndex,batchOffset,batchesThisRun}});
   const batchNumber=Math.floor(batchOffset/batchSize)+1,totalBatches=Math.ceil(allQuestions.length/batchSize);
   await setAutomationStatus(`已选择第 ${batchNumber}/${totalBatches} 批 ${prepared.count} 道题（筛选共 ${allQuestions.length} 道）；正在启动官方考试页面……`);
   const beforeTabs=await chrome.tabs.query({currentWindow:true});
@@ -240,12 +260,22 @@ async function automatePortal(tabId,config,selectionQuestions=null,allQuestions=
 }
 async function startNextAutomationBatch(completedPlayerTabId){
   const {automation}=await chrome.storage.session.get('automation');
-  if(!automation)return false;
+  if(!automation)return 'complete';
   if(!Array.isArray(automation.allQuestions))throw Error('批次题目清单格式已过期；请重新启动自动流程。');
   if(automation.nextIndex>=automation.allQuestions.length){
     await chrome.storage.session.remove('automation');
+    await chrome.storage.local.remove(AUTOMATION_CHECKPOINT_KEY);
     await setAutomationStatus(`全部 ${automation.allQuestions.length} 道匹配题目已完成录制。`,false);
-    return false;
+    return 'complete';
+  }
+  if(automation.batchesThisRun>=batchesPerRunOf(automation.config?.batchesPerRun)){
+    await chrome.storage.session.remove('automation');
+    await waitForOffscreenIdle(true);
+    await returnTabToPortal(completedPlayerTabId);
+    const checkpoint=await getAutomationCheckpoint();
+    const completedBatches=checkpoint?.completedBatches||0;
+    await setAutomationStatus(`已完成本次 ${automation.batchesThisRun} 批；进度 ${completedBatches}/${Math.ceil(automation.allQuestions.length/automationBatchSizeOf(automation.config.batchSize))} 批。已暂停，点击“继续”可从第 ${automation.nextIndex+1} 道题恢复。`,false,'PAUSED');
+    return 'paused';
   }
   const portalTabId=completedPlayerTabId;
   const offset=automation.nextIndex;
@@ -253,17 +283,51 @@ async function startNextAutomationBatch(completedPlayerTabId){
   const selectionQuestions=automation.allQuestions.slice(offset,offset+batchSize);
   await setAutomationStatus(`本批已完成，准备下一批 ${offset+1}–${offset+selectionQuestions.length} / ${automation.allQuestions.length}……`,true,'PORTAL_AUTOMATION');
   console.info('[NT2 Recorder] Reusing the completed player tab for the next batch to preserve its tab-scoped capture authorization.',{completedPlayerTabId,portalTabId,offset});
-  await chrome.tabs.update(portalTabId,{url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten'});
+  await returnTabToPortal(portalTabId);
+  await automatePortal(portalTabId,automation.config,selectionQuestions,automation.allQuestions,offset,automation.batchesThisRun);
+  return 'continued';
+}
+async function waitForOffscreenIdle(requireReleasedCapture=false){
+  const deadline=Date.now()+15000;
+  while(Date.now()<deadline){
+    const state=await chrome.runtime.sendMessage({to:'offscreen',type:'state'}).catch(()=>null);
+    if(state&&!state.running&&(!requireReleasedCapture||state.preparedTabId==null))return;
+    await delay(100);
+  }
+  throw Error('录制流未能及时结束；为避免破坏捕获状态，流程没有继续切换页面。');
+}
+async function returnTabToPortal(tabId){
+  await chrome.tabs.update(tabId,{url:'https://oefenexamensnt2.nl/facet-openbaar-portaal/oefenen/opdrachten'});
   const deadline=Date.now()+30000;
   while(Date.now()<deadline){
-    const tab=await chrome.tabs.get(portalTabId);
-    if(tab.status==='complete'&&isPortalPage(tab.url))break;
+    const tab=await chrome.tabs.get(tabId);
+    if(tab.status==='complete'&&isPortalPage(tab.url))return;
     await delay(200);
   }
-  const portalTab=await chrome.tabs.get(portalTabId);
-  if(!isPortalPage(portalTab.url)||portalTab.status!=='complete')throw Error('无法在已授权的播放器标签页打开下一批题目选择页。');
-  await automatePortal(portalTabId,automation.config,selectionQuestions,automation.allQuestions,offset);
-  return true;
+  throw Error('无法在已授权的播放器标签页打开官方题目选择页。');
+}
+async function resumeAutomation(tabId){
+  const checkpoint=await getAutomationCheckpoint();
+  if(!checkpoint)throw Error('没有找到可继续的保存进度。');
+  const {config,allQuestions,nextQuestionOffset}=checkpoint;
+  if(!Array.isArray(allQuestions)||!allQuestions.length||!Number.isInteger(nextQuestionOffset)||nextQuestionOffset<0||nextQuestionOffset>allQuestions.length)throw Error('保存的进度无效；请开始新流程。');
+  if(nextQuestionOffset===allQuestions.length){
+    await chrome.storage.local.remove(AUTOMATION_CHECKPOINT_KEY);
+    await setAutomationStatus(`全部 ${allQuestions.length} 道匹配题目已完成录制。`,false,'COMPLETED');
+    return {message:'此流程已完成；已清除保存的进度。'};
+  }
+  await prepareTabCapture(tabId);
+  const offset=nextQuestionOffset;
+  const batchSize=automationBatchSizeOf(config.batchSize);
+  const selectionQuestions=allQuestions.slice(offset,offset+batchSize);
+  try{
+    await automatePortal(tabId,config,selectionQuestions,allQuestions,offset,0,allQuestions);
+    return {message:`已从第 ${offset+1} 道题继续；本次最多运行 ${batchesPerRunOf(config.batchesPerRun)} 批。`};
+  }catch(error){
+    const {running:recording,preparedTabId}=await chrome.runtime.sendMessage({to:'offscreen',type:'state'}).catch(()=>({}));
+    if(!recording&&preparedTabId===tabId)await chrome.runtime.sendMessage({to:'offscreen',type:'cancel-capture'}).catch(()=>{});
+    throw error;
+  }
 }
 async function findNextButton(tabId){
   const results=await chrome.scripting.executeScript({target:{tabId,allFrames:true},func:()=>{
@@ -425,18 +489,29 @@ async function handle(m,s){
       advancing.set(session.tabId,attempt);
       try{
           let recorderEvent=event;
+          let automation=null;
+          let completedThisRun=0;
           if(event.name==='final-ready'){
-            const {automation}=await chrome.storage.session.get('automation');
+            ({automation}=await chrome.storage.session.get('automation'));
             const hasNextBatch=Boolean(automation?.allQuestions&&automation.nextIndex<automation.allQuestions.length);
-            recorderEvent={...event,retainCaptureForNextBatch:hasNextBatch,workflowComplete:!hasNextBatch};
+            completedThisRun=(automation?.batchesThisRun||0)+1;
+            const shouldPause=Boolean(hasNextBatch&&completedThisRun>=batchesPerRunOf(automation?.config?.batchesPerRun));
+            recorderEvent={...event,retainCaptureForNextBatch:hasNextBatch&&!shouldPause,workflowComplete:!hasNextBatch};
           }
           const saved=await chrome.runtime.sendMessage({to:'offscreen',type:'event',event:recorderEvent});
         if(!saved?.ok)throw Error(saved?.error||'保存当前题目失败');
         if(event.name==='final-ready'){
+          if(automation){
+            const checkpoint=await getAutomationCheckpoint();
+            if(!checkpoint)throw Error('保存的自动流程进度不存在；本批录音已保存，但无法安全推进进度。');
+            const completedBatches=Math.ceil(automation.nextIndex/automationBatchSizeOf(automation.config.batchSize));
+            await saveAutomationCheckpoint({...checkpoint,nextQuestionOffset:automation.nextIndex,completedBatches});
+            await chrome.storage.session.set({automation:{...automation,batchesThisRun:completedThisRun}});
+          }
           await stopObserver(session.tabId,session.frameId);
           await chrome.storage.session.remove('session');
-          const hasNextBatch=await startNextAutomationBatch(session.tabId);
-          if(!hasNextBatch)await chrome.tabs.remove(session.tabId);
+          const outcome=await startNextAutomationBatch(session.tabId);
+          if(outcome==='complete')await chrome.tabs.remove(session.tabId);
         }else if(!attempt.manualClick){
           attempt.autoClickInitiated=true;
           const result=await clickNextButton(session.tabId,session.frameId);
@@ -448,7 +523,7 @@ async function handle(m,s){
       }catch(e){
         if(event.name==='final-ready'){
           await chrome.storage.session.remove('automation');
-          await setAutomationStatus(`最后一题片段已保存，但关闭页面或启动后续批次失败：${e.message}`,false,'ERROR');
+          await setAutomationStatus(`本批片段已保存，但推进或暂停失败：${e.message}。保存的进度仍可恢复。`,false,'ERROR');
         }else{
           await chrome.runtime.sendMessage({to:'offscreen',type:'event',event:{name:'warning',message:`本题已保存，但无法自动进入下一题：${e.message}。请手动点击 VOLGENDE；录制会继续。`}});
         }
@@ -488,16 +563,20 @@ async function handle(m,s){
     if(starting)throw Error('自动流程正在运行，请稍候');
     const program=String(m.config?.program||'').trim();
     const kind=String(m.config?.kind||'default').trim();
+    const existingCheckpoint=await getAutomationCheckpoint();
+    if(existingCheckpoint&&!m.replaceCheckpoint)throw Error('已有保存的自动流程进度；请先选择“继续”或明确选择“重新开始”。');
     if(!['Programma I Spreken','Programma II Spreken'].includes(program))throw Error('自动音频/麦克风流程仅支持 Programma I/II Spreken。');
     if(!['default','Kort','Lang','Middellang'].includes(kind))throw Error('请选择有效的题型。');
-    const config={...m.config,program,kind,batchSize:automationBatchSizeOf(m.config?.batchSize)};
+    const config={...m.config,program,kind,batchSize:automationBatchSizeOf(m.config?.batchSize),batchesPerRun:batchesPerRunOf(m.config?.batchesPerRun)};
     configOf(config);
     starting=true;
     try{
       await prepareTabCapture(m.tabId);
+      if(existingCheckpoint)await chrome.storage.local.remove(AUTOMATION_CHECKPOINT_KEY);
       await automatePortal(m.tabId,config);
       return {message:'自动设置已完成，并已在 Vraag 1 自动开始录制。'};
     }catch(e){
+      if(existingCheckpoint)await saveAutomationCheckpoint(existingCheckpoint).catch(()=>{});
       const {running:recording,preparedTabId}=await chrome.runtime.sendMessage({to:'offscreen',type:'state'}).catch(()=>({}));
       if(!recording&&preparedTabId===m.tabId){
         await chrome.runtime.sendMessage({to:'offscreen',type:'cancel-capture'}).catch(()=>{});
@@ -506,8 +585,31 @@ async function handle(m,s){
       throw e;
     }finally{starting=false;}
   }
+  if(m.type==='auto-resume'){
+    if(starting)throw Error('自动流程正在启动，请稍候');
+    starting=true;
+    try{return await resumeAutomation(m.tabId);}
+    catch(error){
+      await setAutomationStatus(`继续流程失败：${error.message}。保存的进度未删除。`,false,'ERROR');
+      throw error;
+    }finally{starting=false;}
+  }
 }
 chrome.runtime.onMessage.addListener((m,s,reply)=>{
   if(m.to!=='worker')return;
   handle(m,s).then(value=>reply({ok:true,...(value&&typeof value==='object'?value:{value})})).catch(e=>reply({ok:false,error:e.message}));return true;
 });
+async function recoverInterruptedAutomation(){
+  const [{status},contexts]=await Promise.all([
+    chrome.storage.local.get('status'),
+    chrome.runtime.getContexts({contextTypes:['OFFSCREEN_DOCUMENT']})
+  ]);
+  if(!status?.running)return;
+  let recorderState=null;
+  if(contexts.length)recorderState=await chrome.runtime.sendMessage({to:'offscreen',type:'state'}).catch(()=>null);
+  if(recorderState?.running)return;
+  const checkpoint=await getAutomationCheckpoint();
+  await setAutomationStatus(checkpoint?'自动流程已中断；已保存的进度可在官方题目选择页继续。':'先前录制已停止。',false,checkpoint?'INTERRUPTED':'IDLE');
+}
+chrome.runtime.onStartup.addListener(()=>recoverInterruptedAutomation());
+chrome.runtime.onInstalled.addListener(()=>recoverInterruptedAutomation());

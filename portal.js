@@ -218,6 +218,13 @@ async function prepare(message) {
   }
 
   if (!allQuestions.length) throw Error('此项目和题型下没有找到可选题目。');
+  if(Array.isArray(config.expectedQuestions)){
+    const matches=allQuestions.length===config.expectedQuestions.length&&allQuestions.every((question,index)=>{
+      const expected=config.expectedQuestions[index];
+      return question.page===expected?.page&&question.rowIndex===expected?.rowIndex&&normalize(question.title)===normalize(expected?.title)&&question.kind===expected?.kind&&question.rowKey===String(expected?.rowKey||'');
+    });
+    if(!matches)throw Error('当前官网题目列表与保存进度时不同（题目已增删、重排或修改）；为避免漏题/重复，未继续。请核对题目后选择“重新开始”。');
+  }
   const requestedQuestions=Array.isArray(config.selectionQuestions)?config.selectionQuestions:allQuestions.slice(0,batchSize);
   if(!requestedQuestions.length)throw Error('没有待选择的匹配题目。');
   if(requestedQuestions.length>batchSize)throw Error(`每场最多选择 ${batchSize} 道题。`);
